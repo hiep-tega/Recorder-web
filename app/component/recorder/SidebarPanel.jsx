@@ -48,9 +48,9 @@ export function SidebarPanel({
                       : "rec-status";
               const statusText =
                 item.status === "analyzing"
-                  ? "⏳ Analyzing..."
+                  ? " Analyzing..."
                   : item.status === "error"
-                    ? "⚠ Error"
+                    ? "Error"
                     : item.aiSummary
                       ? item.aiSummary.substring(0, 60) + (item.aiSummary.length > 60 ? "…" : "")
                       : item.description || "New";

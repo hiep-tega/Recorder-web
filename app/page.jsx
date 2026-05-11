@@ -269,7 +269,7 @@ export default function Home() {
 
           const fd = new FormData();
           fd.append("video", blob, "recording.webm");
-          const resp = await fetch(`${REMOTE_HOST}/convert`, { method: "POST", body: fd });
+          const resp = await fetch(`${REMOTE_HOST}/convert`, { method: "  ", body: fd });
           const data = await resp.json();
           if (!resp.ok) throw new Error(data.error || "Conversion failed");
 
