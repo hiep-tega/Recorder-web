@@ -3,6 +3,7 @@ export function PreviewPanel({ loadedUrl, isRecording, elapsedLabel }) {
     <section className="preview-stage">
       {loadedUrl ? (
         <iframe
+          id="gameIframe"
           title="game-preview"
           src={loadedUrl}
           className="game-frame"

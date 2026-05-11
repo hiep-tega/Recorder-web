@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FooterStatus } from "./component/recorder/FooterStatus";
 import { HeaderPanel } from "./component/recorder/HeaderPanel";
 import { PreviewPanel } from "./component/recorder/PreviewPanel";
@@ -10,6 +10,10 @@ import {
   DEFAULT_RECORDER_SETTINGS,
   DEVICE_PRESETS,
 } from "./component/recorder/types";
+
+const REMOTE_HOST =
+  process.env.NEXT_PUBLIC_REMOTE_HOST?.replace(/\/+$/, "") ||
+  "https://a374a6682ea8badf9b.gradio.live";
 
 const SETTINGS_STORAGE_KEY = "recorder.settings.v1";
 
@@ -56,6 +60,41 @@ function elapsedLabel(ms) {
   return `${minutes}:${seconds}`;
 }
 
+/** Transform a remote recordings-list entry to the local shape */
+function remoteToListItem(v) {
+  return {
+    name: v.filename,
+    title: v.title || v.filename,
+    description: v.summary || "",
+    aiSummary: v.summary || "",
+    status: v.status || "new",
+    url: `${REMOTE_HOST}/recordings/${encodeURIComponent(v.filename)}`,
+    createdAt: null,
+  };
+}
+
+/** Transform remote detail info + chat history to the local shape */
+function remoteToDetail(filename, info, chatHistory) {
+  return {
+    name: filename,
+    title: info.title || filename,
+    description: info.summary || "No summary yet.",
+    aiSummary: info.summary || "",
+    status: info.status || "new",
+    url: `${REMOTE_HOST}/recordings/${encodeURIComponent(filename)}`,
+    video: info.video || {},
+    chatHistory: (chatHistory || []).map((m, i) => ({
+      role: m.role,
+      content: m.content,
+      createdAt: new Date(Date.now() - (chatHistory.length - i) * 500).toISOString(),
+    })),
+    aiInsight: {
+      model: "Claude AI",
+      analysis: info.summary || "No analysis yet.",
+    },
+  };
+}
+
 export default function Home() {
   const [urlInput, setUrlInput] = useState("");
   const [loadedUrl, setLoadedUrl] = useState("");
@@ -75,6 +114,7 @@ export default function Home() {
   const recorderRef = useRef(null);
   const streamRef = useRef(null);
   const chunksRef = useRef([]);
+  const pollTimerRef = useRef(null);
 
   const selectedRecord = useMemo(() => {
     const fromList = records.find((item) => item.name === selectedRecordName) ?? records[0] ?? null;
@@ -87,72 +127,68 @@ export default function Home() {
     return fromList;
   }, [records, selectedRecordName, selectedDetail]);
 
-  useEffect(() => {
-    let cancelled = false;
+  // ── Load recordings from remote server ─────────────────────────────────────
+  const loadRecordings = useCallback(async () => {
+    try {
+      const resp = await fetch(`${REMOTE_HOST}/recordings`, { cache: "no-store" });
+      if (!resp.ok) throw new Error("Could not load recordings");
+      const items = await resp.json();
+      const mapped = Array.isArray(items) ? items.map(remoteToListItem) : [];
+      setRecords(mapped);
+      setSelectedRecordName((prev) => prev ?? mapped[0]?.name ?? null);
 
-    const fetchRecords = async () => {
-      try {
-        const response = await fetch("/api/records", { cache: "no-store" });
-        if (!response.ok) {
-          throw new Error("Could not load recordings");
-        }
-        const data = await response.json();
-        if (cancelled) {
-          return;
-        }
-        setRecords(data.records);
-        setSelectedRecordName((prev) => prev ?? data.records[0]?.name ?? null);
-      } catch {
-        if (!cancelled) {
-          setStatus("Could not load recordings");
-        }
+      const hasAnalyzing = mapped.some((r) => r.status === "analyzing");
+      if (hasAnalyzing && !pollTimerRef.current) {
+        pollTimerRef.current = setInterval(loadRecordings, 3000);
+      } else if (!hasAnalyzing && pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    } catch {
+      setStatus("Could not load recordings");
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadRecordings();
+    return () => {
+      if (pollTimerRef.current) {
+        clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
       }
     };
-
-    void fetchRecords();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  }, [loadRecordings]);
 
   useEffect(() => {
     window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settings));
   }, [settings]);
 
+  // ── Load detail when selection changes ─────────────────────────────────────
   useEffect(() => {
-    if (!selectedRecordName) {
-      return;
-    }
-
+    if (!selectedRecordName) return;
     let cancelled = false;
 
     const fetchDetail = async () => {
       try {
-        const response = await fetch(`/api/records/${encodeURIComponent(selectedRecordName)}/meta`, {
-          cache: "no-store",
-        });
-        if (!response.ok) {
-          throw new Error("Could not load detail");
-        }
-        const data = await response.json();
-        if (cancelled) {
-          return;
-        }
-        setSelectedDetail(data.detail);
+        const [infoResp, chatResp] = await Promise.all([
+          fetch(`${REMOTE_HOST}/api/video/${encodeURIComponent(selectedRecordName)}`, { cache: "no-store" }),
+          fetch(`${REMOTE_HOST}/api/video/${encodeURIComponent(selectedRecordName)}/chat`, { cache: "no-store" }),
+        ]);
+        if (!infoResp.ok) throw new Error("Could not load detail");
+        const info = await infoResp.json();
+        const chatHistory = chatResp.ok ? await chatResp.json() : [];
+        if (cancelled) return;
+        const detail = remoteToDetail(selectedRecordName, info, chatHistory);
+        setSelectedDetail(detail);
         setRecords((prev) => {
-          const idx = prev.findIndex((item) => item.name === data.detail.name);
-          if (idx === -1) {
-            return prev;
-          }
+          const idx = prev.findIndex((r) => r.name === selectedRecordName);
+          if (idx === -1) return prev;
           const next = [...prev];
-          next[idx] = { ...next[idx], ...data.detail };
+          next[idx] = { ...next[idx], ...remoteToListItem({ filename: selectedRecordName, ...info }) };
           return next;
         });
       } catch {
-        if (!cancelled) {
-          setStatus("Could not load detail");
-        }
+        if (!cancelled) setStatus("Could not load detail");
       }
     };
 
@@ -184,73 +220,80 @@ export default function Home() {
   };
 
   const handleStartRecord = async () => {
-    if (isRecording) {
-      return;
-    }
+    if (isRecording) return;
     try {
       setStatus("Pick the browser tab/window to capture...");
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: {
-          displaySurface: "browser",
-        },
+
+      const opts = {
+        video: { displaySurface: "browser", frameRate: { ideal: 30 } },
         audio: true,
         preferCurrentTab: true,
-        selfBrowserSurface: "include",
-      });
+      };
+      try { opts.systemAudio = "include"; } catch (_) {}
 
-      const recorder = new MediaRecorder(stream, {
-        mimeType: "video/webm;codecs=vp9,opus",
-      });
+      const stream = await navigator.mediaDevices.getDisplayMedia(opts);
+
+      // Attempt to crop to just the game iframe
+      const iframe = document.getElementById("gameIframe");
+      let cropped = false;
+      if (iframe && typeof CropTarget !== "undefined") {
+        try {
+          const ct = await CropTarget.fromElement(iframe);
+          await stream.getVideoTracks()[0].cropTo(ct);
+          cropped = true;
+        } catch (_) {}
+      }
+
+      const hasAudio = stream.getAudioTracks().length > 0;
+      setStatus(`Recording ${cropped ? "iframe" : "tab"}${hasAudio ? " with audio" : " (no audio)"}...`);
+
+      let mimeType = "video/webm";
+      if (MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus"))
+        mimeType = "video/webm;codecs=vp9,opus";
+      else if (MediaRecorder.isTypeSupported("video/webm;codecs=vp8,opus"))
+        mimeType = "video/webm;codecs=vp8,opus";
+
+      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 5_000_000 });
       chunksRef.current = [];
 
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          chunksRef.current.push(event.data);
-        }
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) chunksRef.current.push(e.data);
       };
 
       recorder.onstop = async () => {
         try {
-          const blob = new Blob(chunksRef.current, { type: "video/webm" });
-          const filename = `record-${Date.now()}.webm`;
-          const file = new File([blob], filename, { type: "video/webm" });
+          if (!chunksRef.current.length) { setStatus("No data recorded."); return; }
+          const blob = new Blob(chunksRef.current, { type: chunksRef.current[0].type || "video/webm" });
+          const sizeMB = (blob.size / 1024 / 1024).toFixed(1);
+          setStatus(`Converting (${sizeMB} MB)...`);
 
-          const formData = new FormData();
-          formData.append("file", file);
-          formData.append("title", `Gameplay ${new Date().toLocaleTimeString()}`);
-          formData.append(
-            "description",
-            loadedUrl
-              ? `Captured from ${new URL(loadedUrl).hostname}`
-              : "Screen recording",
-          );
-          formData.append("sourceUrl", loadedUrl || "about:blank");
-          formData.append("sizeLabel", sizeLabel);
-          formData.append("settingsSnapshot", JSON.stringify(settings));
+          const fd = new FormData();
+          fd.append("video", blob, "recording.webm");
+          const resp = await fetch(`${REMOTE_HOST}/convert`, { method: "POST", body: fd });
+          const data = await resp.json();
+          if (!resp.ok) throw new Error(data.error || "Conversion failed");
 
-          const response = await fetch("/api/records", {
-            method: "POST",
-            body: formData,
-          });
-          if (!response.ok) {
-            throw new Error("Failed to save recording");
-          }
-
-          const saved = await response.json();
-          setStatus("Recording saved");
-          setRecords((prev) => [saved.record, ...prev]);
-          setSelectedRecordName(saved.record.name);
-          setSelectedDetail(saved.record);
+          setStatus(`Saved: ${data.filename} — AI analyzing...`);
+          await loadRecordings();
+          setSelectedRecordName(data.filename);
+          setSelectedDetail(null);
           setActiveTab("recordings");
-        } catch {
-          setStatus("Failed to save recording");
+        } catch (err) {
+          setStatus("Error: " + err.message);
         } finally {
-          stream.getTracks().forEach((track) => track.stop());
+          stream.getTracks().forEach((t) => t.stop());
           streamRef.current = null;
           recorderRef.current = null;
           setIsRecording(false);
           setRecordingStartedAt(null);
           setElapsedMs(0);
+        }
+      };
+
+      // Handle user stopping screen share via browser UI
+      stream.getVideoTracks()[0].onended = () => {
+        if (recorderRef.current && recorderRef.current.state !== "inactive") {
+          recorderRef.current.stop();
         }
       };
 
@@ -260,9 +303,8 @@ export default function Home() {
       setIsRecording(true);
       setRecordingStartedAt(Date.now());
       setElapsedMs(0);
-      setStatus("Recording in progress");
-    } catch {
-      setStatus("Capture was cancelled or blocked");
+    } catch (err) {
+      setStatus(err.name === "NotAllowedError" ? "Recording cancelled." : "Error: " + err.message);
       setIsRecording(false);
       setRecordingStartedAt(null);
       setElapsedMs(0);
@@ -270,43 +312,23 @@ export default function Home() {
   };
 
   const handleStopRecord = () => {
-    if (!recorderRef.current || recorderRef.current.state === "inactive") {
-      return;
-    }
+    if (!recorderRef.current || recorderRef.current.state === "inactive") return;
     setStatus("Saving recording...");
     recorderRef.current.stop();
+    if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
   };
 
-  const updateDetail = (detail) => {
-    setSelectedDetail(detail);
-    setRecords((prev) => {
-      const idx = prev.findIndex((item) => item.name === detail.name);
-      if (idx === -1) {
-        return prev;
-      }
-      const next = [...prev];
-      next[idx] = { ...next[idx], ...detail };
-      return next;
-    });
-  };
-
+  // ── Re-analyze ──────────────────────────────────────────────────────────────
   const handleReanalyze = async () => {
-    if (!selectedRecordName) {
-      return;
-    }
+    if (!selectedRecordName) return;
     setIsDetailWorking(true);
     try {
-      const response = await fetch(`/api/records/${encodeURIComponent(selectedRecordName)}/analyze`, {
+      await fetch(`${REMOTE_HOST}/api/video/${encodeURIComponent(selectedRecordName)}/analyze`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ settingsSnapshot: settings }),
       });
-      if (!response.ok) {
-        throw new Error("Failed analyze");
-      }
-      const data = await response.json();
-      updateDetail(data.detail);
-      setStatus("Analysis refreshed");
+      setStatus("Re-analyzing " + selectedRecordName + "...");
+      await loadRecordings();
+      setSelectedDetail(null);
     } catch {
       setStatus("Could not run analysis");
     } finally {
@@ -314,49 +336,173 @@ export default function Home() {
     }
   };
 
+  // ── Send chat prompt with SSE streaming ─────────────────────────────────────
   const handleSendPrompt = async (prompt) => {
-    if (!selectedRecordName) {
-      return;
-    }
+    if (!selectedRecordName || !prompt.trim()) return;
     setIsDetailWorking(true);
+
+    const now = new Date().toISOString();
+    const userMsg = { role: "user", content: prompt, createdAt: now };
+    const aiPlaceholder = { role: "assistant", content: "", createdAt: now, streaming: true };
+
+    setSelectedDetail((prev) => ({
+      ...prev,
+      chatHistory: [...(prev?.chatHistory ?? []), userMsg, aiPlaceholder],
+    }));
+
     try {
-      const response = await fetch(`/api/records/${encodeURIComponent(selectedRecordName)}/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt, settingsSnapshot: settings }),
-      });
-      if (!response.ok) {
-        throw new Error("Failed chat");
+      const resp = await fetch(
+        `${REMOTE_HOST}/api/video/${encodeURIComponent(selectedRecordName)}/chat`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: prompt }),
+        },
+      );
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let rawAnswer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const data = JSON.parse(line.slice(6));
+            if (data.token) {
+              rawAnswer += data.token;
+              setSelectedDetail((prev) => {
+                if (!prev) return prev;
+                const history = [...(prev.chatHistory ?? [])];
+                const last = history[history.length - 1];
+                if (last?.role === "assistant") {
+                  history[history.length - 1] = { ...last, content: rawAnswer };
+                }
+                return { ...prev, chatHistory: history };
+              });
+            }
+            if (data.done || data.error) {
+              const finalContent = data.error
+                ? rawAnswer + `\n[Error: ${data.error}]`
+                : rawAnswer;
+              setSelectedDetail((prev) => {
+                if (!prev) return prev;
+                const history = [...(prev.chatHistory ?? [])];
+                const last = history[history.length - 1];
+                if (last?.role === "assistant") {
+                  history[history.length - 1] = { ...last, content: finalContent, streaming: false };
+                }
+                return { ...prev, chatHistory: history };
+              });
+            }
+          } catch (_) {}
+        }
       }
-      const data = await response.json();
-      updateDetail(data.detail);
-      setStatus("Chat updated");
-    } catch {
-      setStatus("Could not send chat message");
+    } catch (err) {
+      setStatus("Chat error: " + err.message);
+      setSelectedDetail((prev) => {
+        if (!prev) return prev;
+        const history = [...(prev.chatHistory ?? [])];
+        const last = history[history.length - 1];
+        if (last?.role === "assistant" && last.streaming) {
+          history[history.length - 1] = {
+            ...last,
+            content: last.content || "[Error sending message]",
+            streaming: false,
+          };
+        }
+        return { ...prev, chatHistory: history };
+      });
     } finally {
       setIsDetailWorking(false);
     }
   };
 
+  // ── Clear chat ───────────────────────────────────────────────────────────────
   const handleClearChat = async () => {
-    if (!selectedRecordName) {
-      return;
-    }
+    if (!selectedRecordName) return;
+    if (!window.confirm("Clear all chat history for this recording?")) return;
     setIsDetailWorking(true);
     try {
-      const response = await fetch(`/api/records/${encodeURIComponent(selectedRecordName)}/clear-chat`, {
-        method: "POST",
+      await fetch(`${REMOTE_HOST}/api/video/${encodeURIComponent(selectedRecordName)}/chat`, {
+        method: "DELETE",
       });
-      if (!response.ok) {
-        throw new Error("Failed clear chat");
-      }
-      const data = await response.json();
-      updateDetail(data.detail);
+      setSelectedDetail((prev) => (prev ? { ...prev, chatHistory: [] } : prev));
       setStatus("Chat cleared");
     } catch {
       setStatus("Could not clear chat");
     } finally {
       setIsDetailWorking(false);
+    }
+  };
+
+  // ── Delete recording ─────────────────────────────────────────────────────────
+  const handleDeleteRecord = async (name) => {
+    if (!window.confirm("Delete " + name + "?")) return;
+    try {
+      const resp = await fetch(`${REMOTE_HOST}/recordings/${encodeURIComponent(name)}`, {
+        method: "DELETE",
+      });
+      if (!resp.ok) {
+        const d = await resp.json();
+        throw new Error(d.error);
+      }
+      if (selectedRecordName === name) {
+        setSelectedRecordName(null);
+        setSelectedDetail(null);
+      }
+      setStatus("Deleted: " + name);
+      void loadRecordings();
+    } catch (err) {
+      setStatus("Error: " + err.message);
+    }
+  };
+
+  // ── Rename recording ─────────────────────────────────────────────────────────
+  const handleRenameRecord = async (name) => {
+    const baseName = name.replace(/\.mp4$/i, "");
+    const newBase = window.prompt("Rename recording:", baseName);
+    if (!newBase || newBase === baseName) return;
+    const newName = newBase.endsWith(".mp4") ? newBase : newBase + ".mp4";
+    try {
+      const resp = await fetch(`${REMOTE_HOST}/recordings/${encodeURIComponent(name)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ newName }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || "Rename failed");
+      if (selectedRecordName === name) setSelectedRecordName(data.filename);
+      setStatus("Renamed to: " + data.filename);
+      void loadRecordings();
+    } catch (err) {
+      setStatus("Error: " + err.message);
+    }
+  };
+
+  // ── Edit title ───────────────────────────────────────────────────────────────
+  const handleEditTitle = async (name) => {
+    const current = selectedRecord?.title || name;
+    const newTitle = window.prompt("Edit title:", current);
+    if (!newTitle || newTitle === current) return;
+    try {
+      await fetch(`${REMOTE_HOST}/api/video/${encodeURIComponent(name)}/title`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: newTitle }),
+      });
+      setSelectedDetail((prev) => (prev ? { ...prev, title: newTitle } : prev));
+      setRecords((prev) => prev.map((r) => (r.name === name ? { ...r, title: newTitle } : r)));
+      setStatus("Title updated");
+    } catch (err) {
+      setStatus("Error: " + err.message);
     }
   };
 
@@ -395,6 +541,9 @@ export default function Home() {
           onReanalyze={handleReanalyze}
           onClearChat={handleClearChat}
           onSendPrompt={handleSendPrompt}
+          onDeleteRecord={handleDeleteRecord}
+          onRenameRecord={handleRenameRecord}
+          onEditTitle={handleEditTitle}
         />
       </main>
 

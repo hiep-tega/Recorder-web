@@ -230,7 +230,53 @@ body {
   padding: 10px;
   background: rgba(11, 29, 68, 0.75);
   cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
+
+.record-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.record-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.btn-icon {
+  background: none;
+  border: none;
+  color: #6e92bb;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 4px 5px;
+  border-radius: 4px;
+  text-decoration: none;
+  line-height: 1;
+}
+
+.btn-icon:hover {
+  color: #e0e0e0;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.btn-icon.del:hover {
+  color: #e94560;
+  background: rgba(233, 69, 96, 0.15);
+}
+
+.rec-status {
+  font-size: 11px;
+  color: #666;
+  margin-top: 2px;
+}
+
+.rec-status.analyzing { color: #f0a500; }
+.rec-status.ready { color: #4ecdc4; }
+.rec-status.error { color: #e94560; }
 
 .record-item.active {
   border-color: #4aa4ff;
@@ -374,6 +420,16 @@ body {
   margin: 0;
   white-space: pre-wrap;
   color: #d7efff;
+}
+
+@keyframes blink-cursor {
+  50% { opacity: 0; }
+}
+.streaming-cursor {
+  display: inline-block;
+  animation: blink-cursor 0.7s step-end infinite;
+  color: #4ecdc4;
+  margin-left: 2px;
 }
 
 .chat-form {

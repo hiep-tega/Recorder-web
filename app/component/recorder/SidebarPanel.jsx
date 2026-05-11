@@ -11,6 +11,9 @@ export function SidebarPanel({
   onReanalyze,
   onClearChat,
   onSendPrompt,
+  onDeleteRecord,
+  onRenameRecord,
+  onEditTitle,
 }) {
   return (
     <aside className="sidebar">
@@ -32,22 +35,66 @@ export function SidebarPanel({
       {activeTab === "recordings" ? (
         <div className="record-list">
           {records.length === 0 ? (
-            <p className="empty-list">No recordings yet. Start one to save into the uploads folder.</p>
+            <p className="empty-list">No recordings yet.</p>
           ) : (
-            records.map((item) => (
-              <article
-                key={item.name}
-                className={item.name === selectedRecord?.name ? "record-item active" : "record-item"}
-                onClick={() => onSelectRecord(item.name)}
-              >
-                <h3>{item.title}</h3>
-                <p>{item.aiSummary || item.description}</p>
-                <div className="record-meta">{formatTimestamp(item.createdAt)}</div>
-                <a href={item.url} target="_blank" rel="noreferrer" className="record-link">
-                  Open recording
-                </a>
-              </article>
-            ))
+            records.map((item) => {
+              const statusCls =
+                item.status === "analyzing"
+                  ? "rec-status analyzing"
+                  : item.status === "ready"
+                    ? "rec-status ready"
+                    : item.status === "error"
+                      ? "rec-status error"
+                      : "rec-status";
+              const statusText =
+                item.status === "analyzing"
+                  ? "⏳ Analyzing..."
+                  : item.status === "error"
+                    ? "⚠ Error"
+                    : item.aiSummary
+                      ? item.aiSummary.substring(0, 60) + (item.aiSummary.length > 60 ? "…" : "")
+                      : item.description || "New";
+
+              return (
+                <article
+                  key={item.name}
+                  className={item.name === selectedRecord?.name ? "record-item active" : "record-item"}
+                  onClick={() => onSelectRecord(item.name)}
+                >
+                  <div className="record-info">
+                    <h3>{item.title}</h3>
+                    <p className={statusCls}>{statusText}</p>
+                    {item.createdAt && (
+                      <div className="record-meta">{formatTimestamp(item.createdAt)}</div>
+                    )}
+                  </div>
+                  <div className="record-actions" onClick={(e) => e.stopPropagation()}>
+                    <a
+                      href={item.url}
+                      download
+                      className="btn-icon"
+                      title="Download"
+                    >
+                      ⬇
+                    </a>
+                    <button
+                      className="btn-icon"
+                      title="Rename"
+                      onClick={() => onRenameRecord?.(item.name)}
+                    >
+                      ✎
+                    </button>
+                    <button
+                      className="btn-icon del"
+                      title="Delete"
+                      onClick={() => onDeleteRecord?.(item.name)}
+                    >
+                      ×
+                    </button>
+                  </div>
+                </article>
+              );
+            })
           )}
         </div>
       ) : (
@@ -58,6 +105,7 @@ export function SidebarPanel({
             onReanalyze={onReanalyze}
             onClearChat={onClearChat}
             onSendPrompt={onSendPrompt}
+            onEditTitle={onEditTitle}
           />
         </div>
       )}
